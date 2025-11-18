@@ -1,0 +1,1 @@
+# src/ingestion/api_consumer/__init__.py

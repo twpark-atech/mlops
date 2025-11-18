@@ -1,0 +1,28 @@
+# docker/Dockerfile.jupyter
+FROM jupyter/scipy-notebook:python-3.11
+
+USER root
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        git \
+        vim \
+        build-essential \
+        libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+USER jovyan
+WORKDIR /workspace
+
+ENV PYTHONPATH=/workspace:${PYTHONPATH}
+
+COPY --chown=jovyan:users requirements.txt /tmp/requirements.txt
+
+RUN if [ -f /tmp/requirements.txt ]; then \
+        pip install --no-cache-dir -r /tmp/requirements.txt; \
+    else \
+        echo "[WARN] /tmp/requirements.txt not found, skipping pip install"; \
+    fi
+
+RUN pip install --no-cache-dir ipykernel && \
+    python -m ipykernel install --user --name mlops --display-name "Python (mlops)"
