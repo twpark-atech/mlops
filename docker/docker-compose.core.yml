@@ -97,52 +97,6 @@ services:
     networks:
       - mlops
 
-  airflow:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.airflow
-    container_name: mlops-airflow
-    depends_on:
-      - postgres
-      - minio
-      - broker
-      - mlflow
-    environment:
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
-      AIRFLOW__CORE__FERNET_KEY: "THIS_IS_A_RANDOM_FERNET_KEY_CHANGE_ME"
-      AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
-      AIRFLOW__CORE__DEFAULT_TIMEZONE: "Asia/Seoul"
-      AIRFLOW__WEBSERVER__DEFAULT_UI_TIMEZONE: "Asia/Seoul"
-      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "False"
-      PG_HOST: postgres
-      PG_PORT: "5432"
-      PG_DB: mlops
-      PG_USER: postgres
-      PG_PASSWORD: postgres
-      MLFLOW_TRACKING_URI: http://mlflow:5000
-      AWS_ACCESS_KEY_ID: minio
-      AWS_SECRET_ACCESS_KEY: miniostorage
-      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
-    ports:
-      - "8080:8080"
-    command: >
-      bash -c "
-        airflow db upgrade &&
-        airflow users create
-          --username admin
-          --password admin
-          --firstname Admin
-          --lastname User
-          --role Admin
-          --email admin@example.com || true &&
-        airflow webserver --port 8080 &
-        airflow scheduler
-      "
-    volumes:
-      - airflow-logs:/opt/airflow/logs
-    networks:
-      - mlops
 
   jupyter:
     build:
