@@ -75,9 +75,10 @@ def upload_zip_to_datalake(
 
             minio_client.put_object(
                 bucket_name=bucket,
-                obejct_name=object_name,
+                object_name=object_name,
                 data=data_stream,
-                length=len(file_bytes)
+                length=len(file_bytes),
+                content_type="application/octet-stream"
             )
 
             event = {
@@ -93,7 +94,10 @@ def upload_zip_to_datalake(
 
 def run_job(job: Dict[str, Any], base_conf: Dict[str, Any]) -> None:
     url = job["url"]
-    kafka_topic = job.get("kafka_topic", base_conf["kafka"]["topics"["its_traffic_raw"]])
+    kafka_topic = job.get(
+        "kafka_topic",
+        base_conf["kafka"]["topics"]["its_traffic_raw"]
+    )
     lake_prefix = job.get("lake_prefix", base_conf["datalake"]["prefix"])
 
     date_part = infer_date_from_url(url)
@@ -114,6 +118,15 @@ def run_job(job: Dict[str, Any], base_conf: Dict[str, Any]) -> None:
         kafka_topic=kafka_topic
     )
     logger.info(f"[{job['name']}] Ingestion completed.")
+
+def ingest_from_url(job_name: str, url: str) -> None:
+    """
+    Convenience wrapper so other components (e.g. Airflow) can trigger
+    a single ingestion job without relying on the YAML fan-out.
+    """
+    base_conf = load_base_config()
+    job = {"name": job_name, "url": url}
+    run_job(job, base_conf)
 
 def main(job_name: Optional[str] = None) -> None:
     setup_logging()

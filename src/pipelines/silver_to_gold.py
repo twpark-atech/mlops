@@ -45,7 +45,7 @@ def run_its_traffic_silver_to_gold(start_date: str, end_date: str) -> None:
     base_silver = "s3a://its/traffic/silver"
 
     pg_host = _get_env("PG_HOST", "localhost")
-    pg_port = _get_env("PG_PORT", "5431")
+    pg_port = _get_env("PG_PORT", "5432")
     pg_db = _get_env("PG_DB", "mlops")
     pg_user = _get_env("PG_USER", "postgres")
     pg_password = _get_env("PG_PASSWORD", "postgres")

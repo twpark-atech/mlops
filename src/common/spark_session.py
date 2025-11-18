@@ -17,8 +17,8 @@ def create_spark(app_name: str) -> SparkSession:
         .config("spark.sql.files.maxPartitionBytes", os.getenv("SPARK_MAX_PART_BYTES", "128m"))
         .config("spark.hadoop.fs.s3a.endpoint", s3_endpoint)
         .config("spark.hadoop.fs.s3a.access.key", s3_access_key)
-        .config("spark.hadoop.f3.s3a.secret.key", s3_secret_key)
-        .config("spark.hadoop.f3.s3a.path.style.access", "true")
+        .config("spark.hadoop.fs.s3a.secret.key", s3_secret_key)
+        .config("spark.hadoop.fs.s3a.path.style.access", "true")
         .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
         .config(
             "spark.jars.packages",
