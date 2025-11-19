@@ -89,10 +89,7 @@ services:
       --backend-store-uri postgresql://postgres:postgres@postgres:5432/mlops
       --host 0.0.0.0
       --port 5000
-<<<<<<< Updated upstream
       --default-artifact-root s3://its/mlflow/
-    ports:
-      - "5000:5000"
     networks:
       - mlops
 
@@ -126,9 +123,7 @@ services:
       start-notebook.sh
       --NotebookApp.token='mlops'
       --NotebookApp.allow_origin='*'
-=======
       --default-artifact-root s3://its/mlflow
->>>>>>> Stashed changes
     networks:
       - mlops
 

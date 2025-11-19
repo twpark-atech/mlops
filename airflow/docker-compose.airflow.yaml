@@ -337,3 +337,7 @@ services:
 
 volumes:
   postgres-db-volume:
+
+networks:
+  mlops:
+    external: true
