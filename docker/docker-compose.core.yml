@@ -121,9 +121,9 @@ services:
       MINIO_SECRET_KEY: miniostorage
     command: >
       start-notebook.sh
-      --NotebookApp.token='mlops'
-      --NotebookApp.allow_origin='*'
-      --default-artifact-root s3://its/mlflow
+      --NotebookApp.token=mlops
+      --NotebookApp.allow_origin=*
+      --NotebookApp.disable_check_xsrf=True
     networks:
       - mlops
 
