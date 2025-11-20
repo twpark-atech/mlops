@@ -99,8 +99,7 @@ def its_bronze_to_silver(start_date: str, end_date: str) -> None:
             df_bronze = spark.read.parquet(input_path)
 
             df = (
-                df_bronze
-                .select(
+                df_bronze.select(
                     F.col("CREATDE").cast("string"),
                     F.col("CREATHM").cast("string"),
                     F.col("LINKID").cast("string"),
@@ -147,7 +146,7 @@ def its_bronze_to_silver(start_date: str, end_date: str) -> None:
                 df.groupBy("datetime_5min", "LINKID")
                 .agg(F.avg("PASNGSPED").alias("self_mean"))
                 .withColumnRenamed("LINKID", "linkid")
-                .withColumnRenamed("datetime_5m", "datetime")
+                .withColumnRenamed("datetime_5min", "datetime")
             )
 
             (
@@ -220,7 +219,7 @@ def its_silver_to_gold(start_date: str, end_date: str) -> None:
 
         try:
             df_silver = spark.read.parquet(input_path)
-
+            
             cols = df_silver.columns
 
             rename_map = {}
@@ -234,11 +233,17 @@ def its_silver_to_gold(start_date: str, end_date: str) -> None:
             df_out = df_silver
             for src, dst in rename_map.items():
                 df_out = df_out.withColumnRenamed(src, dst)
-            
+
             df_out = df_out.withColumn("date", F.lit(dt).cast("string"))
 
+            # Gold 테이블이 self_mean 외 t1/t2/f1/f2_mean을 요구하므로 기본값으로 self_mean 복사
+            if "self_mean" in df_out.columns:
+                for extra_col in ["t1_mean", "t2_mean", "f1_mean", "f2_mean"]:
+                    if extra_col not in df_out.columns:
+                        df_out = df_out.withColumn(extra_col, F.col("self_mean"))
+
             ordered_cols = []
-            for c in ["date", "datetime", "linkid"]:
+            for c in ["date", "datetime", "linkid", "self_mean", "t1_mean", "t2_mean", "f1_mean", "f2_mean"]:
                 if c in df_out.columns:
                     ordered_cols.append(c)
             ordered_cols += [c for c in df_out.columns if c not in ordered_cols]
