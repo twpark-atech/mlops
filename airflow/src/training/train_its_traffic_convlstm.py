@@ -1,6 +1,7 @@
 # src/training/train_its_traffic_convlstm.py
 
 from __future__ import annotations
+import io
 import os
 import argparse
 from dataclasses import dataclass
@@ -15,6 +16,9 @@ import torch.nn as nn
 import psycopg2
 import mlflow
 import mlflow.pytorch
+
+from minio import Minio
+from minio.error import S3Error
 
 from .model import TrafficConvLSTM  # src/training/model.py
 
@@ -248,10 +252,15 @@ class TrainConfig:
     pg_password: str = "postgres"
     pg_table: str = "its_traffic_5min_gold"
 
-    # 출력/체크포인트
-    output_dir: str = "outputs/its_traffic_convlstm"
-    ckpt_dir: str = "outputs/its_traffic_convlstm/checkpoints"
-    weight_path: str = "outputs/its_traffic_convlstm/weights_best.pth"
+    # 🔹 MinIO 설정 (로컬 outputs 대신 사용)
+    #   최종 경로: s3a://model/its/traffic/its_traffic_convlstm/...
+    minio_endpoint: str = "minio:9000"
+    minio_access_key: str = "minio"
+    minio_secret_key: str = "miniostorage"
+    minio_bucket: str = "model"
+    # base = "s3a://its/traffic/" 였으니, 그 아래에 job 이름을 붙인다.
+    minio_prefix: str = "its/traffic/its_traffic_convlstm"
+
 
 
 def set_seed(seed: int = 42):
@@ -381,14 +390,56 @@ def load_gold_from_postgres(cfg: TrainConfig) -> pd.DataFrame:
     return df
 
 
+def _get_minio_client(cfg: TrainConfig) -> Minio:
+    """
+    MinIO 클라이언트 생성 (HTTP 기반, 내부 네트워크에서 사용).
+    """
+    client = Minio(
+        endpoint=cfg.minio_endpoint,
+        access_key=cfg.minio_access_key,
+        secret_key=cfg.minio_secret_key,
+        secure=False,  # http://minio:9000 이면 False
+    )
+    # 버킷 없으면 생성 (idempotent)
+    if not client.bucket_exists(cfg.minio_bucket):
+        client.make_bucket(cfg.minio_bucket)
+    return client
+
+
+def _upload_bytes_to_minio(
+    client: Minio,
+    cfg: TrainConfig,
+    data_bytes: bytes,
+    object_name: str,
+) -> str:
+    """
+    메모리 상의 바이트를 MinIO에 업로드.
+    object_name 은 버킷 내 키 (예: 'its/traffic/its_traffic_convlstm/checkpoints/epoch_001.pth')
+    반환값은 s3a:// 경로 (로깅용).
+    """
+    data_stream = io.BytesIO(data_bytes)
+    length = len(data_bytes)
+
+    client.put_object(
+        bucket_name=cfg.minio_bucket,
+        object_name=object_name,
+        data=data_stream,
+        length=length,
+    )
+
+    # 로깅에서 보기 좋게 s3a:// 형식으로 반환
+    return f"s3a://{cfg.minio_bucket}/{object_name}"
+
+
+
 def run_training(cfg: TrainConfig) -> None:
     if not cfg.start_date or not cfg.end_date:
         raise ValueError("start_date/end_date must be provided for training")
 
-    # 기본 출력 폴더들
-    os.makedirs(cfg.output_dir, exist_ok=True)
-    os.makedirs(cfg.ckpt_dir, exist_ok=True)
-    os.makedirs(os.path.dirname(cfg.weight_path), exist_ok=True)
+    # 🔹 로컬 디렉토리 생성 제거 (outputs 사용 안 함)
+    # os.makedirs(cfg.output_dir, exist_ok=True)
+    # os.makedirs(cfg.ckpt_dir, exist_ok=True)
+    # os.makedirs(os.path.dirname(cfg.weight_path), exist_ok=True)
 
     set_seed(cfg.seed)
 
@@ -396,6 +447,9 @@ def run_training(cfg: TrainConfig) -> None:
     tracking_uri = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
     mlflow.set_tracking_uri(tracking_uri)
     mlflow.set_experiment(cfg.mlflow_experiment)
+
+    # 🔹 MinIO 클라이언트 준비
+    minio_client = _get_minio_client(cfg)
 
     run_name = cfg.mlflow_run_name or cfg.job_name
     with mlflow.start_run(run_name=run_name):
@@ -416,6 +470,9 @@ def run_training(cfg: TrainConfig) -> None:
             "val_days": cfg.val_days,
             "grad_clip": cfg.grad_clip,
             "device": cfg.device,
+            # MinIO 관련도 같이 로깅
+            "minio_bucket": cfg.minio_bucket,
+            "minio_prefix": cfg.minio_prefix,
         })
 
         # 🔹 GOLD 로드
@@ -521,6 +578,7 @@ def run_training(cfg: TrainConfig) -> None:
         # 🔹 Train loop
         best_val = float("inf")
         best_state = None
+        best_weights_s3_path: Optional[str] = None
 
         for epoch in range(1, cfg.epochs + 1):
             tr_mae, tr_f1 = train_one_epoch(model, dl_tr, optim, loss_fn, device, cfg, thr_z)
@@ -543,20 +601,45 @@ def run_training(cfg: TrainConfig) -> None:
                 step=epoch,
             )
 
-            # 로컬 checkpoint
-            ckpt_path = os.path.join(cfg.ckpt_dir, f"epoch_{epoch:03d}.pth")
-            torch.save(
-                {"epoch": epoch, "state_dict": model.state_dict(), "thr_z": thr_z},
-                ckpt_path,
-            )
-            # 필요하면: mlflow.log_artifact(ckpt_path, artifact_path="checkpoints")
+            # 🔹 체크포인트를 메모리 버퍼에 저장 후 MinIO에 업로드
+            ckpt_state = {
+                "epoch": epoch,
+                "state_dict": model.state_dict(),
+                "thr_z": thr_z,
+            }
+            ckpt_buffer = io.BytesIO()
+            torch.save(ckpt_state, ckpt_buffer)
+            ckpt_bytes = ckpt_buffer.getvalue()
 
-            # 베스트 모델 갱신
+            ckpt_object_name = f"{cfg.minio_prefix}/checkpoints/epoch_{epoch:03d}.pth"
+            ckpt_s3_path = _upload_bytes_to_minio(
+                minio_client,
+                cfg,
+                ckpt_bytes,
+                ckpt_object_name,
+            )
+            # 필요하면 MLflow에 경로 로그
+            mlflow.log_text(ckpt_s3_path, artifact_file=f"checkpoints/epoch_{epoch:03d}.pth.path")
+
+            # 🔹 베스트 모델 갱신
             if np.isfinite(va_mae) and va_mae < best_val:
                 best_val = va_mae
                 best_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
-                torch.save(best_state, cfg.weight_path)
-                mlflow.log_artifact(cfg.weight_path, artifact_path="best_model")
+
+                # best weights를 MinIO에 업로드
+                best_buffer = io.BytesIO()
+                torch.save(best_state, best_buffer)
+                best_bytes = best_buffer.getvalue()
+
+                best_object_name = f"{cfg.minio_prefix}/weights_best.pth"
+                best_weights_s3_path = _upload_bytes_to_minio(
+                    minio_client,
+                    cfg,
+                    best_bytes,
+                    best_object_name,
+                )
+                # MLflow에 best 경로를 남겨두면 나중에 서빙/분석에서 쓰기 좋다
+                mlflow.log_param("best_weights_s3_path", best_weights_s3_path)
 
         mlflow.log_metric("best_val_mae", best_val)
 
@@ -578,6 +661,9 @@ def run_training(cfg: TrainConfig) -> None:
 
         if best_state is None:
             print("Warning: best_state is None. No best model saved.")
+        else:
+            print(f"Best model weights stored at: {best_weights_s3_path}")
+
 
 
 def main():

@@ -84,46 +84,15 @@ services:
       AWS_ACCESS_KEY_ID: minio
       AWS_SECRET_ACCESS_KEY: miniostorage
       MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      WERKZEUG_ALLOWED_HOSTS: mlflow,localhost
+      MLFLOW_SECURITY_MIDDLEWARE_ALLOWED_HOSTS: mlflow,mlflow:5000,localhost,localhost:5000
     command: >
       mlflow server
       --backend-store-uri postgresql://postgres:postgres@postgres:5432/mlops
       --host 0.0.0.0
       --port 5000
       --default-artifact-root s3://its/mlflow/
-    networks:
-      - mlops
-
-
-  jupyter:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.jupyter
-    container_name: mlops-jupyter
-    depends_on:
-      - postgres
-      - minio
-      - mlflow
-    ports:
-      - "8888:8888"
-    volumes:
-      - ..:/workspace
-    working_dir: /workspace
-    environment:
-      JUPYTER_TOKEN: mlops
-      MLFLOW_TRACKING_URI: http://mlflow:5000
-      PG_HOST: postgres
-      PG_PORT: 5432
-      PG_DB: mlops
-      PG_USER: postgres
-      PG_PASSWORD: postgres
-      S3_ENDPOINT: http://minio:9000
-      MINIO_ACCESS_KEY: minio
-      MINIO_SECRET_KEY: miniostorage
-    command: >
-      start-notebook.sh
-      --NotebookApp.token=mlops
-      --NotebookApp.allow_origin=*
-      --NotebookApp.disable_check_xsrf=True
+      --allowed-hosts mlflow,mlflow:5000,localhost,localhost:5000
     networks:
       - mlops
 
