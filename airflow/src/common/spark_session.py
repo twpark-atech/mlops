@@ -1,11 +1,12 @@
-# src/common/spark_session.py
+# airflow/src/common/spark_session.py
 import os
 from pyspark.sql import SparkSession
 
+
 def create_spark(app_name: str) -> SparkSession:
     s3_endpoint = os.getenv("S3_ENDPOINT", "minio:9000")
-    s3_access_key = os.getenv("MINIO_ACCESS_KEY", "minio")
-    s3_secret_key = os.getenv("MINIO_SECRET_KEY", "miniostorage")
+    s3_access_key = os.getenv("S3_ACCESS_KEY", "minio")
+    s3_secret_key = os.getenv("S3_SECRET_KEY", "miniostorage")
 
     builder = (
         SparkSession.builder

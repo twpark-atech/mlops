@@ -15,7 +15,7 @@ for i in {1..30}; do
     sleep 2
 done
 
-echo "Creating topci $TOPIC_ITS_RAW (if not exists)..."
+echo "Creating topic $TOPIC_ITS_RAW (if not exists)..."
 kafka-topics.sh --bootstrap-server "$KAFKA_BROKER" \
     --create --if-not-exists \
     --topic "$TOPIC_ITS_RAW" \

@@ -1,15 +1,17 @@
-# src/ingestion/file_ingestor/main.py
+# airflow/src/ingestion/file_ingestor/main.py
 import io
+import os
 import logging
 import zipfile
 import requests
-from src.common.logging_utils import setup_logging
+from typing import Any, Dict, List, Optional
+
+from minio import Minio
+
 from src.common.config_loader import load_base_config, load_ingestion_file_config
 from src.common.kafka_utils import get_kafka_producer, send_event
-from minio import Minio
-from typing import Optional, Dict, Any, List
+from src.common.logging_utils import setup_logging
 
-logger = logging.getLogger(__name__)
 
 def infer_date_from_url(url: str) -> str:
     name = url.rstrip("/").split("/")[-1]
@@ -21,12 +23,14 @@ def infer_date_from_url(url: str) -> str:
         return prefix
     return "unknown_date"
 
+
 def download_zip_in_memory(url: str, timeout: int = 60) -> bytes:
     logger.info(f"Downloading Zip from: {url}")
     resp = requests.get(url, timeout=timeout)
     resp.raise_for_status()
-    logger.info(f"Downloaded {len(resp.content):,} bytes from {url}")
+    logger.info(f"Donwloaded {len(resp.content):,} bytes from {url}")
     return resp.content
+
 
 def get_minio_client(conf: Dict[str, Any]) -> Minio:
     return Minio(
@@ -36,12 +40,14 @@ def get_minio_client(conf: Dict[str, Any]) -> Minio:
         secure=conf.get("secure", False)
     )
 
+
 def ensure_bucket(client: Minio, bucket: str) -> None:
     if not client.bucket_exists(bucket):
         logger.info(f"Bucket '{bucket}' not found. Creating...")
         client.make_bucket(bucket)
     else:
         logger.info(f"Bucket '{bucket}' already exists.")
+        
 
 def upload_zip_to_datalake(
     zip_bytes: bytes,
@@ -92,61 +98,75 @@ def upload_zip_to_datalake(
         producer.flush()
         logger.info("All files uploaded and events sent.")
 
+
+def _env_bool(var_name: str, default: bool) -> bool:
+    raw = os.getenv(var_name)
+    if raw is None:
+        return default
+    return raw.lower() in ("1", "true", "yes", "on")
+
+
 def run_job(job: Dict[str, Any], base_conf: Dict[str, Any]) -> None:
     url = job["url"]
+
+    kafka_conf = base_conf.get("kafka", {})
     kafka_topic = job.get(
         "kafka_topic",
-        base_conf["kafka"]["topics"]["its_traffic_raw"]
+        os.getenv(
+            "KAFKA_TOPIC_ITS_TRAFFIC_RAW",
+            kafka_conf.get("topics", {}).get("its_traffic_raw", "its_traffic_raw")
+        )
     )
-    lake_prefix = job.get("lake_prefix", base_conf["datalake"]["prefix"])
+
+    datalake_conf = base_conf.get("datalake", {})
+    ingestion_conf = base_conf.get("ingestion", {})
+    lake_prefix = job.get(
+        "lake_prefix",
+        os.getenv(
+            "INGESTION_LAEK_PREFIX",
+            ingestion_conf.get("lake_prefix", datalake_conf.get("prefix", "traffic/raw"))
+        )
+    )
 
     date_part = infer_date_from_url(url)
     logger.info(f"[{job['name']}] Inferred date partition: {date_part}")
+
+    minio_conf = base_conf.get("minio", {})
+    minio_settings = {
+        "endpoint": os.getenv("MINIO_ENDPOINT", minio_conf.get("endpoint", "minio:9000")),
+        "access_key": os.getenv("MINIO_ACCESS_KEY", minio_conf.get("access_key", "")),
+        "secret_key": os.getenv("MINIO_SECRET_KEY", minio_conf.get("secret_key", "")),
+        "secure": _env_bool("MINIO_SECURE", bool(minio_conf.get("secure", False))),
+        "bucket": os.getenv("MINIO_BUCKET", minio_conf.get("bucket", "its")),        
+    }
+
+    kafka_bootstrap = os.getenv(
+        "KAFKA_BOOTSTRAP_SERVERS",
+        kafka_conf.get("bootstrap_servers", "broker:29092")
+    )
 
     zip_bytes = download_zip_in_memory(url)
     upload_zip_to_datalake(
         zip_bytes=zip_bytes,
         date_partition=date_part,
         lake_prefix=lake_prefix,
-        minio_conf={
-            **base_conf["minio"],
-            "bucket": base_conf["minio"]["bucket"]
-        },
-        kafka_conf={
-            "bootstrap_servers": base_conf["kafka"]["bootstrap_servers"]
-        },
+        minio_conf=minio_settings,
+        kafka_conf={"bootstrap_servers": kafka_bootstrap},
         kafka_topic=kafka_topic
     )
     logger.info(f"[{job['name']}] Ingestion completed.")
 
-def ingest_from_url(job_name: str, url: str) -> None:
-    """
-    Convenience wrapper so other components (e.g. Airflow) can trigger
-    a single ingestion job without relying on the YAML fan-out.
-    """
+
+def ingest_from_url(job_name: str, url: str) ->: None:
+    setup_logging()
+    logger.info(f"Starting file ingestion from {url}...")
+
     base_conf = load_base_config()
     job = {"name": job_name, "url": url}
     run_job(job, base_conf)
 
-def main(job_name: Optional[str] = None) -> None:
-    setup_logging()
-    logger.info("Starting file ingestion...")
-
-    base_conf = load_base_config()
-    ingest_conf = load_ingestion_file_config()
-    jobs: List[Dict[str, Any]] = ingest_conf.get("jobs", [])
-
-    if job_name:
-        jobs = [j for j in jobs if j["name"] == job_name]
-
-    if not jobs:
-        logger.warning("No jobs found to run.")
-        return
-    
-    for job in jobs:
-        run_job(job, base_conf)
-    
     logger.info("All file ingestion jobs completed.")
+
 
 if __name__ == "__main__":
     main()

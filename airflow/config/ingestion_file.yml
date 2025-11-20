@@ -1,6 +1,6 @@
 # config/ingestion_file.yml
 jobs:
-  - name: its_traffic_5min_20251113
-    url: "https://www.its.go.kr/opendata/fileDownload/traffic/2025/20251113_5Min.zip"
+  - name: its_traffic_5min
+    url: "http://www.its.go.kr/opendata/fileDownload/traffic/2025/"
     kafka_topic: "its_traffic_raw"
     lake_prefix: "traffic/raw"

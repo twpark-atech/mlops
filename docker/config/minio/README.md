@@ -1,1 +1,0 @@
-# docker/config/minio/README.md

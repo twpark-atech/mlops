@@ -1,15 +1,22 @@
--- docker/config/postgres-init.sql
-CREATE SCHEMA IF NOT EXISTS ml;
+-- docker/config/potsgres-init.sql
+CREATE TABLE IF NOT EXISTS its_traffic_5min_gold(
+    date        VARCHAR(8)  NOT NULL,
+    datetime    TIMESTAMP   NOT NULL,
+    linkid      VARCHAR(20) NOT NULL,
 
-CREATE TABLE IF NOT EXISTS ml.train_dataset(
-    id          BIGSERIAL PRIMARY KEY,
-    event_time  TIMESTAMP NOT NULL,
-    feature_1   DOUBLE PRECISION,
-    feature_2   DOUBLE PRECISION,
-    feature_3   DOUBLE PRECISION,
-    label       INTEGER,
-    created_at  TIMESTAMP DEFAULT NOW()
+    t2_mean     REAL        NOT NULL,
+    t1_mean     REAL        NOT NULL,
+    self_mean   REAL        NOT NULL,
+    f1_mean     REAL        NOT NULL,
+    f2_mean     REAL        NOT NULL,
+
+    created_at  TIMESTAMP   NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT pk_its_traffic_5min_gold PRIMARY KEY (date, datetime, linkid)
 );
+
+CREATE INDEX IF NOT EXISTS idx_its_traffic_5min_gold_link_date
+    ON its_traffic_5min_gold (linkid, date);
 
 CREATE ROLE airflow LOGIN PASSWORD 'airflow';
 CREATE DATABASE airflow OWNER airflow;

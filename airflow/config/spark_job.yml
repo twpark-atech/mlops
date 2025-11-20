@@ -1,7 +1,7 @@
 # config/spark_job.yml
 raw_to_bronze_jobs:
-  - name: its_traffic_raw_5min
-    description: "ITS 5분 단위 교통 raw CSV -> bronze Parquet"
+  - name: its_traffic_5min
+    description: "ITS 5분 단위 교통 raw CSV -> bronze parquet"
     input:
       format: csv
       path: "s3a://its/traffic/raw/date=*/"

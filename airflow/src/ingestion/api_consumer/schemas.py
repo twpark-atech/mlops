@@ -1,1 +1,0 @@
-# src/ingestion/api_consumer/schemas.py
