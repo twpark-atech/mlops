@@ -15,15 +15,19 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict
 
-from airflow import DAG
-from airflow.providers.standard.operators.python import PythonOperator
+# Airflow 3.1.3 compatible import
+from airflow.decorators import dag, task
+from airflow.operators.empty import EmptyOperator
+
 from minio import Minio
 from minio.error import S3Error
 
+# Project Root
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
+# Project imports
 from src.common.config_loader import load_base_config
 from src.ingestion.file_ingestor.main import ingest_from_url
 from src.pipelines.raw_to_bronze import run_its_traffic_raw_to_bronze
@@ -39,126 +43,67 @@ DEFAULT_URL_TEMPLATE = (
 )
 
 
-def _resolve_pipeline_date(context) -> tuple[datetime, str]:
-    """Return logical datetime and formatted string for the processing date."""
+# ---------------------------------------------------------------------------
+# Utility Functions
+# ---------------------------------------------------------------------------
+
+def resolve_processing_date(context) -> tuple[datetime, str]:
     params = context["params"]
+
     override = params.get("processing_date")
     if override:
-        logical = datetime.strptime(override, DATE_FMT)
+        dt = datetime.strptime(override, DATE_FMT)
     else:
-        logical = context["logical_date"]
-    return logical, logical.strftime(DATE_FMT)
+        dt = context["logical_date"]
+
+    return dt, dt.strftime(DATE_FMT)
 
 
-def _build_ingestion_url(
-    params: Dict[str, Any],
-    logical_date,
-    date_str: str,
-) -> str:
+def build_ingestion_url(params: Dict[str, Any], logical_date, date_str: str) -> str:
     template = params.get("ingestion_url_template", DEFAULT_URL_TEMPLATE)
-    replacements = {
-        "date": date_str,
-        "year": logical_date.strftime("%Y"),
-        "month": logical_date.strftime("%m"),
-        "day": logical_date.strftime("%d"),
-    }
-    return template.format(**replacements)
+    return template.format(
+        date=date_str,
+        year=logical_date.strftime("%Y"),
+        month=logical_date.strftime("%m"),
+        day=logical_date.strftime("%d"),
+    )
 
 
-def _partition_exists(minio_conf: Dict[str, Any], lake_prefix: str, date_str: str) -> bool:
+def minio_partition_exists(minio_conf: Dict[str, Any], prefix: str, date_str: str) -> bool:
     client = Minio(
         minio_conf["endpoint"],
         access_key=minio_conf["access_key"],
         secret_key=minio_conf["secret_key"],
         secure=minio_conf.get("secure", False),
     )
+
     bucket = minio_conf["bucket"]
-    prefix = f"{lake_prefix.rstrip('/')}/date={date_str}/"
+    pfx = f"{prefix.rstrip('/')}/date={date_str}/"
+
     try:
-        iterator = client.list_objects(bucket, prefix=prefix, recursive=True)
-        first_obj = next(iterator, None)
-        return first_obj is not None
+        obj = next(client.list_objects(bucket, prefix=pfx, recursive=True), None)
+        return obj is not None
     except S3Error as exc:
-        logger.warning("MinIO partition lookup failed for %s (%s): %s", bucket, prefix, exc)
+        logger.warning("MinIO lookup failed (%s): %s", pfx, exc)
         return False
 
 
-def ingest_raw_to_datalake(**context):
-    params = context["params"]
-    logical_date, date_str = _resolve_pipeline_date(context)
-    job_prefix = params.get("ingestion_job_name_prefix", "its_traffic_5min")
-    url = _build_ingestion_url(params, logical_date, date_str)
-    base_conf = load_base_config()
-    lake_prefix = params.get("ingestion_lake_prefix", base_conf["datalake"]["prefix"])
-    if _partition_exists(base_conf["minio"], lake_prefix, date_str):
-        logger.info(
-            "Skipping ingestion for %s because %s/date=%s already has data",
-            date_str,
-            lake_prefix,
-            date_str,
-        )
-        return
-    logger.info("Triggering ingestion for %s via %s", date_str, url)
-    ingest_from_url(job_name=f"{job_prefix}_{date_str}", url=url)
+# ---------------------------------------------------------------------------
+# DAG Definition
+# ---------------------------------------------------------------------------
 
-
-def run_raw_to_bronze(**context):
-    _, date_str = _resolve_pipeline_date(context)
-    logger.info("Launching RAW→BRONZE for %s", date_str)
-    run_its_traffic_raw_to_bronze(start_date=date_str, end_date=date_str)
-
-
-def run_bronze_to_silver(**context):
-    _, date_str = _resolve_pipeline_date(context)
-    logger.info("Launching BRONZE→SILVER for %s", date_str)
-    run_its_traffic_bronze_to_silver(start_date=date_str, end_date=date_str)
-
-
-def run_silver_to_gold(**context):
-    _, date_str = _resolve_pipeline_date(context)
-    logger.info("Launching SILVER→GOLD for %s", date_str)
-    run_its_traffic_silver_to_gold(start_date=date_str, end_date=date_str)
-
-
-def train_convlstm(**context):
-    params = context["params"]
-    logical_date, end_date = _resolve_pipeline_date(context)
-    window_days = int(params.get("training_window_days", 30))
-    window_days = max(window_days, 1)
-    start_dt = (logical_date - timedelta(days=window_days - 1)).strftime(DATE_FMT)
-    job_name = params.get("training_job_name", "its_traffic_5min_convlstm")
-
-    cfg = TrainConfig(job_name=job_name, start_date=start_dt, end_date=end_date)
-    overrides: Dict[str, Any] = params.get("training_overrides", {})
-    for key, value in overrides.items():
-        if hasattr(cfg, key):
-            setattr(cfg, key, value)
-    logger.info(
-        "Training %s with window %s→%s (overrides=%s)",
-        job_name,
-        start_dt,
-        end_date,
-        overrides,
-    )
-    run_training(cfg)
-
-
-default_args = {
-    "owner": "mlops",
-    "depends_on_past": False,
-    "retries": 1,
-    "retry_delay": timedelta(minutes=5),
-}
-
-with DAG(
-    dag_id="its_traffic_full_pipeline",
-    description="E2E pipeline: Kafka ingestion → MinIO lake → Spark curation → Postgres + ML",
+@dag(
+    dag_id="its_traffic_full_pipeline_tf",
+    description="ITS Traffic → MinIO → Spark → Postgres → ML Pipeline (Airflow 3.1.3 Compatible)",
     schedule="@daily",
     start_date=datetime(2025, 11, 13),
     catchup=False,
-    default_args=default_args,
     max_active_runs=1,
-    tags=["its", "traffic", "mlops"],
+    default_args={
+        "owner": "mlops",
+        "retries": 1,
+        "retry_delay": timedelta(minutes=5),
+    },
     params={
         "ingestion_url_template": DEFAULT_URL_TEMPLATE,
         "ingestion_job_name_prefix": "its_traffic_5min",
@@ -168,30 +113,98 @@ with DAG(
         "training_overrides": {},
         "processing_date": datetime(2025, 11, 13).strftime(DATE_FMT),
     },
-) as dag:
-    ingest_task = PythonOperator(
-        task_id="ingest_raw_zip",
-        python_callable=ingest_raw_to_datalake,
-    )
+    tags=["its", "traffic", "mlops"],
+)
+def its_traffic_pipeline_tf():
+    base_conf = load_base_config()
 
-    raw_to_bronze_task = PythonOperator(
-        task_id="raw_to_bronze",
-        python_callable=run_raw_to_bronze,
-    )
+    # -------------------------------
+    # 1) RAW ingestion
+    # -------------------------------
+    @task
+    def ingest_raw(**context):
+        params = context["params"]
+        minio_conf = base_conf["minio"]
+        lake_prefix = params["ingestion_lake_prefix"]
 
-    bronze_to_silver_task = PythonOperator(
-        task_id="bronze_to_silver",
-        python_callable=run_bronze_to_silver,
-    )
+        logical_date, date_str = resolve_processing_date(context)
+        url = build_ingestion_url(params, logical_date, date_str)
 
-    silver_to_gold_task = PythonOperator(
-        task_id="silver_to_gold",
-        python_callable=run_silver_to_gold,
-    )
+        # partition 존재 시 skip
+        if minio_partition_exists(minio_conf, lake_prefix, date_str):
+            logger.info("[SKIP] RAW partition already exists for %s", date_str)
+            return date_str  # ✔ 무조건 date만 반환한다
 
-    train_task = PythonOperator(
-        task_id="train_convlstm",
-        python_callable=train_convlstm,
-    )
+        job_name = f"{params['ingestion_job_name_prefix']}_{date_str}"
+        logger.info("[INGEST] %s → %s", url, job_name)
 
-    ingest_task >> raw_to_bronze_task >> bronze_to_silver_task >> silver_to_gold_task >> train_task
+        ingest_from_url(job_name=job_name, url=url)
+
+        return date_str  # ✔ dict 대신 문자열 반환
+
+    # -------------------------------
+    # 2) RAW → BRONZE
+    # -------------------------------
+    @task
+    def raw_to_bronze(date: str):
+        logger.info("[RAW→BRONZE] %s", date)
+        run_its_traffic_raw_to_bronze(start_date=date, end_date=date)
+        return date
+
+    # -------------------------------
+    # 3) BRONZE → SILVER
+    # -------------------------------
+    @task
+    def bronze_to_silver(date: str):
+        logger.info("[BRONZE→SILVER] %s", date)
+        run_its_traffic_bronze_to_silver(start_date=date, end_date=date)
+        return date
+
+    # -------------------------------
+    # 4) SILVER → GOLD
+    # -------------------------------
+    @task
+    def silver_to_gold(date: str):
+        logger.info("[SILVER→GOLD] %s", date)
+        run_its_traffic_silver_to_gold(start_date=date, end_date=date)
+        return date
+
+    # -------------------------------
+    # 5) ML Training
+    # -------------------------------
+    @task
+    def train_model(date: str, **context):
+        params = context["params"]
+        logical_date, _ = resolve_processing_date(context)
+
+        # window 계산
+        window = max(int(params.get("training_window_days", 30)), 1)
+        start_dt = (logical_date - timedelta(days=window - 1)).strftime(DATE_FMT)
+        end_dt = date
+        job_name = params["training_job_name"]
+
+        cfg = TrainConfig(job_name=job_name, start_date=start_dt, end_date=end_dt)
+
+        # override 적용
+        for key, value in params.get("training_overrides", {}).items():
+            if hasattr(cfg, key):
+                setattr(cfg, key, value)
+
+        logger.info("[TRAIN] %s window %s → %s", job_name, start_dt, end_dt)
+        run_training(cfg)
+
+    # -------------------------------
+    # DAG FLOW
+    # -------------------------------
+    start = EmptyOperator(task_id="start")
+
+    ingestion_date = ingest_raw()
+    bronze = raw_to_bronze(ingestion_date)
+    silver = bronze_to_silver(bronze)
+    gold = silver_to_gold(silver)
+    train_model(gold)
+
+    start >> ingestion_date
+
+
+its_traffic_pipeline_tf()
