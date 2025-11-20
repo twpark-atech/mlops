@@ -16,12 +16,15 @@ from pathlib import Path
 from typing import Any, Dict
 
 from airflow import DAG
-from airflow.operators.python import PythonOperator
+from airflow.providers.standard.operators.python import PythonOperator
+from minio import Minio
+from minio.error import S3Error
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
+from src.common.config_loader import load_base_config
 from src.ingestion.file_ingestor.main import ingest_from_url
 from src.pipelines.raw_to_bronze import run_its_traffic_raw_to_bronze
 from src.pipelines.bronze_to_silver import run_its_traffic_bronze_to_silver
@@ -62,11 +65,39 @@ def _build_ingestion_url(
     return template.format(**replacements)
 
 
+def _partition_exists(minio_conf: Dict[str, Any], lake_prefix: str, date_str: str) -> bool:
+    client = Minio(
+        minio_conf["endpoint"],
+        access_key=minio_conf["access_key"],
+        secret_key=minio_conf["secret_key"],
+        secure=minio_conf.get("secure", False),
+    )
+    bucket = minio_conf["bucket"]
+    prefix = f"{lake_prefix.rstrip('/')}/date={date_str}/"
+    try:
+        iterator = client.list_objects(bucket, prefix=prefix, recursive=True)
+        first_obj = next(iterator, None)
+        return first_obj is not None
+    except S3Error as exc:
+        logger.warning("MinIO partition lookup failed for %s (%s): %s", bucket, prefix, exc)
+        return False
+
+
 def ingest_raw_to_datalake(**context):
     params = context["params"]
     logical_date, date_str = _resolve_pipeline_date(context)
     job_prefix = params.get("ingestion_job_name_prefix", "its_traffic_5min")
     url = _build_ingestion_url(params, logical_date, date_str)
+    base_conf = load_base_config()
+    lake_prefix = params.get("ingestion_lake_prefix", base_conf["datalake"]["prefix"])
+    if _partition_exists(base_conf["minio"], lake_prefix, date_str):
+        logger.info(
+            "Skipping ingestion for %s because %s/date=%s already has data",
+            date_str,
+            lake_prefix,
+            date_str,
+        )
+        return
     logger.info("Triggering ingestion for %s via %s", date_str, url)
     ingest_from_url(job_name=f"{job_prefix}_{date_str}", url=url)
 
@@ -131,6 +162,7 @@ with DAG(
     params={
         "ingestion_url_template": DEFAULT_URL_TEMPLATE,
         "ingestion_job_name_prefix": "its_traffic_5min",
+        "ingestion_lake_prefix": "traffic/raw",
         "training_window_days": 30,
         "training_job_name": "its_traffic_5min_convlstm",
         "training_overrides": {},
