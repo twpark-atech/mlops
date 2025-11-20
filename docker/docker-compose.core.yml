@@ -8,7 +8,7 @@ services:
       - "9001:9001"
     environment:
       MINIO_ROOT_USER: minio
-      NINIO_ROOT_PASSWORD: miniostorage
+      MINIO_ROOT_PASSWORD: miniostorage
     command: server /data --console-address ":9001"
     volumes:
       - minio-data:/data
@@ -120,6 +120,8 @@ services:
       PG_USER: postgres
       PG_PASSWORD: postgres
       S3_ENDPOINT: http://minio:9000
+    networks:
+      - mlops
 
 volumes:
   minio-data:

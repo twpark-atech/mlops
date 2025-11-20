@@ -1,4 +1,5 @@
 # airflow/src/common/db_utils.py
+import io
 import psycopg2
 import pandas as pd
 from minio import Minio

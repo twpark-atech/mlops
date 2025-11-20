@@ -11,5 +11,5 @@ minio:
   secure: false
   bucket: "its"
 
-detalake:
+datalake:
   prefix: "traffic/raw"

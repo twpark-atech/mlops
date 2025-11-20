@@ -72,6 +72,9 @@ def resolve_processing_date(context) -> tuple[datetime, str]:
     else:
         dt = context["logical_date"]
 
+    # 기본은 실행일 전날 데이터를 처리한다.
+    dt = dt - timedelta(days=1)
+
     return dt, dt.strftime(DATE_FMT)
 
 

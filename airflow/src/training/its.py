@@ -76,19 +76,6 @@ class TrainConfig:
     minio_prefix: str = field(default_factory=lambda: _TRAIN_CONF.get("minio_prefix", "its/traffic/its_traffic_convlstm"))
 
 
-QUERY = f"""
-    SELECT
-        datetime, linkid,
-        self_mean AS self_mean,
-        self_mean AS t1_mean,
-        self_mean AS t2_mean,
-        self_mean AS f1_mean,
-        self_mean AS f2_mean
-    FROM {TrainConfig.pg_table}
-    WHERE date BETWEEN %s AND %s
-"""
-
-
 def ensure_5min_grid(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["datetime"] = _parse_datetime(df["datetime"])
@@ -106,7 +93,7 @@ def ensure_5min_grid(df: pd.DataFrame) -> pd.DataFrame:
     for link, g in df.groupby("linkid", sort=False):
         if g.empty:
             continue
-        g = g.sort_index("datetime").reset_index(drop=True)
+        g = g.sort_values("datetime").reset_index(drop=True)
         idx = pd.date_range(g["datetime"].min(), g["datetime"].max(), freq="5min")
         g2 = g.set_index("datetime").reindex(idx)
         g2["linkid"] = link
@@ -268,7 +255,20 @@ def run_training(cfg: TrainConfig) -> None:
             "minio_prefix": cfg.minio_prefix,
         })
 
-        df = load_gold_from_postgres(cfg, QUERY)
+        df = load_gold_from_postgres(
+            cfg, 
+            f"""
+                SELECT
+                    datetime, linkid,
+                    self_mean AS self_mean,
+                    self_mean AS t1_mean,
+                    self_mean AS t2_mean,
+                    self_mean AS f1_mean,
+                    self_mean AS f2_mean
+                FROM {cfg.pg_table}
+                WHERE date BETWEEN %s AND %s
+            """
+        )
         df = df[["datetime", "linkid"] + FEATURE_COLS].copy()
 
         df = ensure_5min_grid(df)

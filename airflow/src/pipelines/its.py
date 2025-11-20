@@ -196,8 +196,8 @@ def _delete_existing_partition(
             conn.close()
 
 
-def its_bronze_to_silver(start_date: str, end_date: str) -> None:
-    spark = create_spark("BRONZE_TO_SILVER_ITS_TRAFFIC_5MIN")
+def its_silver_to_gold(start_date: str, end_date: str) -> None:
+    spark = create_spark("SILVER_TO_GOLD_ITS_TRAFFIC_5MIN")
 
     pg_host = os.getenv("PG_HOST", _POSTGRES_CONF.get("host", "postgres"))
     pg_port = os.getenv("PG_PORT", str(_POSTGRES_CONF.get("port", 5432)))

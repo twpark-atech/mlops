@@ -1,4 +1,4 @@
-# config/spark_job.yml
+# config/spark_jobs.yml
 raw_to_bronze_jobs:
   - name: its_traffic_5min
     description: "ITS 5분 단위 교통 raw CSV -> bronze parquet"

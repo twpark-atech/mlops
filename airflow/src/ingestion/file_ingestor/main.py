@@ -8,9 +8,12 @@ from typing import Any, Dict, List, Optional
 
 from minio import Minio
 
-from src.common.config_loader import load_base_config, load_ingestion_file_config
+from src.common.config_loader import load_base_config
 from src.common.kafka_utils import get_kafka_producer, send_event
 from src.common.logging_utils import setup_logging
+
+
+logger = logging.getLogger(__name__)
 
 
 def infer_date_from_url(url: str) -> str:
@@ -28,7 +31,10 @@ def download_zip_in_memory(url: str, timeout: int = 60) -> bytes:
     logger.info(f"Downloading Zip from: {url}")
     resp = requests.get(url, timeout=timeout)
     resp.raise_for_status()
-    logger.info(f"Donwloaded {len(resp.content):,} bytes from {url}")
+    size = len(resp.content)
+    logger.info(f"Donwloaded {size:,} bytes from {url}")
+    if size == 0:
+        raise ValueError(f"Empty response returned from {url}. Cannot process ZIP.")
     return resp.content
 
 
@@ -63,40 +69,48 @@ def upload_zip_to_datalake(
 
     producer = get_kafka_producer(kafka_conf["bootstrap_servers"])
 
-    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-        members = [m for m in zf.infolist() if not m.is_dir()]
-        logger.info(f"{len(members)} files found in ZIP.")
+    try:
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            members = [m for m in zf.infolist() if not m.is_dir()]
+            logger.info(f"{len(members)} files found in ZIP.")
 
-        for member in members:
-            file_bytes = zf.read(member)
-            object_name = f"{lake_prefix}/date={date_partition}/{member.filename}"
+            for member in members:
+                file_bytes = zf.read(member)
+                object_name = f"{lake_prefix}/date={date_partition}/{member.filename}"
 
-            logger.info(
-                f"Uploading to MinIO bucket={bucket}, key={object_name}, "
-                f"size={len(file_bytes):,} bytes"
-            )
-            
-            data_stream = io.BytesIO(file_bytes)
-            data_stream.seek(0)
+                logger.info(
+                    f"Uploading to MinIO bucket={bucket}, key={object_name}, "
+                    f"size={len(file_bytes):,} bytes"
+                )
+                
+                data_stream = io.BytesIO(file_bytes)
+                data_stream.seek(0)
 
-            minio_client.put_object(
-                bucket_name=bucket,
-                object_name=object_name,
-                data=data_stream,
-                length=len(file_bytes),
-                content_type="application/octet-stream"
-            )
+                minio_client.put_object(
+                    bucket_name=bucket,
+                    object_name=object_name,
+                    data=data_stream,
+                    length=len(file_bytes),
+                    content_type="application/octet-stream"
+                )
 
-            event = {
-                "date": date_partition,
-                "bucket": bucket,
-                "key": object_name,
-                "size": len(file_bytes)
-            }
-            send_event(producer, topic=kafka_topic, payload=event)
+                event = {
+                    "date": date_partition,
+                    "bucket": bucket,
+                    "key": object_name,
+                    "size": len(file_bytes)
+                }
+                send_event(producer, topic=kafka_topic, payload=event)
 
-        producer.flush()
-        logger.info("All files uploaded and events sent.")
+            producer.flush()
+            logger.info("All files uploaded and events sent.")
+    except zipfile.BadZipFile:
+        logger.error(
+            "Received invalid ZIP (date=%s, lake_prefix=%s).",
+            date_partition,
+            lake_prefix,
+        )
+        raise
 
 
 def _env_bool(var_name: str, default: bool) -> bool:
@@ -123,7 +137,7 @@ def run_job(job: Dict[str, Any], base_conf: Dict[str, Any]) -> None:
     lake_prefix = job.get(
         "lake_prefix",
         os.getenv(
-            "INGESTION_LAEK_PREFIX",
+            "INGESTION_LAKE_PREFIX",
             ingestion_conf.get("lake_prefix", datalake_conf.get("prefix", "traffic/raw"))
         )
     )
@@ -157,7 +171,7 @@ def run_job(job: Dict[str, Any], base_conf: Dict[str, Any]) -> None:
     logger.info(f"[{job['name']}] Ingestion completed.")
 
 
-def ingest_from_url(job_name: str, url: str) ->: None:
+def ingest_from_url(job_name: str, url: str) -> None:
     setup_logging()
     logger.info(f"Starting file ingestion from {url}...")
 
@@ -166,7 +180,3 @@ def ingest_from_url(job_name: str, url: str) ->: None:
     run_job(job, base_conf)
 
     logger.info("All file ingestion jobs completed.")
-
-
-if __name__ == "__main__":
-    main()
