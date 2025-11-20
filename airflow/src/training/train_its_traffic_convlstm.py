@@ -241,7 +241,7 @@ class TrainConfig:
     mlflow_register_name: Optional[str] = None  # 모델 레지스트리에 등록하고 싶으면 이름 지정
 
     # Postgres
-    pg_host: str = "localhost"
+    pg_host: str = "postgres"
     pg_port: int = 5432
     pg_db: str = "mlops"
     pg_user: str = "postgres"
@@ -393,7 +393,7 @@ def run_training(cfg: TrainConfig) -> None:
     set_seed(cfg.seed)
 
     # 🔹 MLflow 기본 설정
-    tracking_uri = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000")
+    tracking_uri = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
     mlflow.set_tracking_uri(tracking_uri)
     mlflow.set_experiment(cfg.mlflow_experiment)
 
