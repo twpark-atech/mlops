@@ -59,8 +59,9 @@ def _parse_start_date(raw: str | None, fallback: datetime) -> datetime:
 
 SCHEDULE_INTERVAL = os.getenv("ITS_DAG_SCHEDULE", "@daily")
 START_DATE = _parse_start_date(os.getenv("AIRFLOW_ITS_START_DATE"), datetime(2025, 11, 1))
-CATCHUP_ENABLED = _env_bool("CATCHUP_ENABLED", False)
+CATCHUP_ENABLED = _env_bool("CATCHUP_ENABLED", True)
 MAX_ACTIVE_RUNS = int(os.getenv("ITS_DAG_MAX_ACTIVE_RUNS", "1"))
+TRAINING_BASE_DATE = _parse_start_date(os.getenv("AIRFLOW_ITS_START_DATE"), START_DATE,)
 
 
 def resolve_processing_date(context) -> tuple[datetime, str]:
@@ -130,7 +131,7 @@ def minio_partition_exists(minio_conf: Dict[str, Any], prefix: str, date_str: st
     },
     tags=["its", "traffic", "mlops"],
 )
-def its_traffic_pipeline():
+def its_traffic_full_pipeline():
     base_conf = load_base_config()
 
     # -------------------------------
@@ -189,11 +190,11 @@ def its_traffic_pipeline():
     @task
     def train_model(date: str, **context):
         params = context["params"]
-        logical_date, _ = resolve_processing_date(context)
 
-        window = max(int(params.get("training_window_days", 30)), 1)
-        start_dt = (logical_date - timedelta(days=window - 1)).strftime(DATE_FMT)
+        start_dt = TRAINING_BASE_DATE.strftime(DATE_FMT)
+
         end_dt = date
+
         job_name = params["training_job_name"]
 
         cfg = TrainConfig(job_name=job_name, start_date=start_dt, end_date=end_dt)
@@ -202,7 +203,7 @@ def its_traffic_pipeline():
             if hasattr(cfg, key):
                 setattr(cfg, key, value)
 
-        logger.info("[TRAIN] %s window %s → %s", job_name, start_dt, end_dt)
+        logger.info("[TRAIN] %s range %s → %s", job_name, start_dt, end_dt)
         run_training(cfg)
 
     # -------------------------------
@@ -219,4 +220,4 @@ def its_traffic_pipeline():
     start >> ingestion_date
 
 
-its_traffic_pipeline()
+its_traffic_full_pipeline()
