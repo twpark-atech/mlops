@@ -13,3 +13,48 @@ minio:
 
 datalake:
   prefix: "traffic/raw"
+  paths:
+    raw: "s3a://its/traffic/raw"
+    bronze: "s3a://its/traffic/bronze"
+    silver: "s3a://its/traffic/silver"
+ingestion:
+  file_type: "zip"           # zip | csv | any single file
+  object_key_template: null  # optional: e.g. "{lake_prefix}/date={date}/{filename}"
+
+traffic_pipeline:
+  raw_columns:
+    date: "CREATDE"
+    time: "CREATHM"
+    link_id: "LINKID"
+    speed: "PASNGSPED"
+    extra_numeric:
+      - "PASNGTIME"
+  link_ids:
+    - "1920161400"
+    - "1920161500"
+    - "1920121301"
+    - "1920121401"
+    - "1920161902"
+    - "1920162205"
+    - "1920162400"
+    - "1920000702"
+    - "1920000801"
+    - "1920121000"
+    - "1920121302"
+    - "1920121402"
+    - "1920235801"
+    - "1920189001"
+    - "1920139400"
+    - "1920161801"
+    - "1920162207"
+    - "1920162304"
+    - "1920162500"
+    - "1920171200"
+    - "1920171600"
+    - "1920188900"
+    - "1920138500"
+  gold_table: "its_traffic_5min_gold"
+  paths:
+    raw: "s3a://its/traffic/raw"
+    bronze: "s3a://its/traffic/bronze"
+    silver: "s3a://its/traffic/silver"

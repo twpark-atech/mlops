@@ -37,6 +37,8 @@ _DEFAULT_CONF = load_base_config()
 _INGESTION_DEFAULTS = _DEFAULT_CONF.get("ingestion", {})
 _TRAINING_DEFAULTS = _DEFAULT_CONF.get("training", {})
 _DATALAKE_DEFAULTS = _DEFAULT_CONF.get("datalake", {})
+_MINIO_DEFAULTS = _DEFAULT_CONF.get("minio", {})
+_KAFKA_DEFAULTS = _DEFAULT_CONF.get("kafka", {})
 
 DEFAULT_URL_TEMPLATE = _INGESTION_DEFAULTS.get(
     "url_template",
@@ -47,6 +49,10 @@ DEFAULT_LAKE_PREFIX = _INGESTION_DEFAULTS.get(
     "lake_prefix",
     _DATALAKE_DEFAULTS.get("prefix", "traffic/raw"),
 )
+DEFAULT_FILE_TYPE = _INGESTION_DEFAULTS.get("file_type", "zip")
+DEFAULT_OBJECT_TEMPLATE = _INGESTION_DEFAULTS.get("object_key_template")
+DEFAULT_BUCKET = _MINIO_DEFAULTS.get("bucket", "its")
+DEFAULT_KAFKA_TOPIC = _KAFKA_DEFAULTS.get("topics", {}).get("its_traffic_raw", "its_traffic_raw")
 DEFAULT_TRAINING_JOB_NAME = _TRAINING_DEFAULTS.get(
     "job_name",
     "its_traffic_5min_convlstm",
@@ -144,6 +150,10 @@ def minio_partition_exists(minio_conf: Dict[str, Any], prefix: str, date_str: st
         "ingestion_url_template": DEFAULT_URL_TEMPLATE,
         "ingestion_job_name_prefix": DEFAULT_JOB_NAME_PREFIX,
         "ingestion_lake_prefix": DEFAULT_LAKE_PREFIX,
+        "ingestion_file_type": DEFAULT_FILE_TYPE,
+        "ingestion_object_template": DEFAULT_OBJECT_TEMPLATE,
+        "ingestion_bucket": DEFAULT_BUCKET,
+        "ingestion_kafka_topic": DEFAULT_KAFKA_TOPIC,
         "training_job_name": DEFAULT_TRAINING_JOB_NAME,
         "training_overrides": {},
         "valid_days": DEFAULT_VALID_DAYS,
@@ -211,8 +221,14 @@ def its_traffic_full_pipeline():
             return []
 
         params = context["params"]
-        minio_conf = base_conf["minio"]
+        minio_conf = {
+            **base_conf["minio"],
+            "bucket": params["ingestion_bucket"],
+        }
         lake_prefix = params["ingestion_lake_prefix"]
+        file_type = params["ingestion_file_type"]
+        object_tpl = params["ingestion_object_template"]
+        kafka_topic = params["ingestion_kafka_topic"]
 
         ingested_count = 0
         skipped_count = 0
@@ -229,7 +245,16 @@ def its_traffic_full_pipeline():
 
             job_name = f"{params['ingestion_job_name_prefix']}_{date_str}"
             logger.info("[INGEST] %s → %s", url, job_name)
-            ingest_from_url(job_name=job_name, url=url)
+            ingest_from_url(
+                job_name=job_name,
+                url=url,
+                file_type=file_type,
+                bucket=minio_conf["bucket"],
+                lake_prefix=lake_prefix,
+                kafka_topic=kafka_topic,
+                object_key_template=object_tpl,
+                date=date_str,
+            )
             ingested_count += 1
 
         logger.info(

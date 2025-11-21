@@ -1,7 +1,7 @@
 # airflow/src/common/config_loader.py
 import os
 import yaml
-from typing import Any, Dict, Iterable, Tuple
+from typing import Any, Dict, Iterable, Tuple, Union
 from pathlib import Path
 
 
@@ -83,7 +83,8 @@ def _coerce_env_value(raw: str, current: Any) -> Any:
     return raw
 
 
-ENV_OVERRIDE_MAP: Tuple[Tuple[Tuple[str, ...], str], ...] = (
+EnvNames = Union[str, Tuple[str, ...]]
+ENV_OVERRIDE_MAP: Tuple[Tuple[Tuple[str, ...], EnvNames], ...] = (
     (("kafka", "bootstrap_servers"), "KAFKA_BOOTSTRAP_SERVERS"),
     (("minio", "endpoint"), "MINIO_ENDPOINT"),
     (("minio", "access_key"), "MINIO_ACCESS_KEY"),
@@ -103,7 +104,7 @@ ENV_OVERRIDE_MAP: Tuple[Tuple[Tuple[str, ...], str], ...] = (
     (("postgres", "db"), "PG_DB"),
     (("postgres", "user"), "PG_USER"),
     (("postgres", "password"), "PG_PASSWORD"),
-    (("postgres", "table"), "ITS_TRAFFIC_GOLD_TABLE"),
+    (("postgres", "table"), ("PIPELINE_GOLD_TABLE", "ITS_TRAFFIC_GOLD_TABLE")),
     (("training", "job_name"), "TRAINING_JOB_NAME"),
     (("training", "window_days"), "TRAINING_WINDOW_DAYS"),
     (("training", "val_days"), "TRAINING_VAL_DAYS"),
@@ -123,8 +124,13 @@ ENV_OVERRIDE_MAP: Tuple[Tuple[Tuple[str, ...], str], ...] = (
 
 
 def _apply_env_overrides(data: Dict[str, Any]) -> Dict[str, Any]:
-    for path, env_name in ENV_OVERRIDE_MAP:
-        override_value = os.getenv(env_name)
+    for path, env_names in ENV_OVERRIDE_MAP:
+        names = (env_names,) if isinstance(env_names, str) else env_names
+        override_value = None
+        for env_name in names:
+            if env_name in os.environ:
+                override_value = os.environ[env_name]
+                break
         if override_value is None:
             continue
         cursor: Dict[str, Any] = data
