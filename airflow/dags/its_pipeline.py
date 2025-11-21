@@ -6,7 +6,7 @@ import os
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from airflow.decorators import dag, task
 from airflow.operators.empty import EmptyOperator
@@ -14,6 +14,9 @@ from airflow.operators.empty import EmptyOperator
 from minio import Minio
 from minio.error import S3Error
 
+# ----------------------------------------------------------------------
+# PYTHONPATH 설정
+# ----------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
@@ -23,25 +26,39 @@ from src.ingestion.file_ingestor.main import ingest_from_url
 from src.pipelines.its import its_raw_to_bronze, its_bronze_to_silver, its_silver_to_gold
 from src.training.its import TrainConfig, run_training
 
-
 logger = logging.getLogger(__name__)
 
 DATE_FMT = "%Y%m%d"
 
+# ----------------------------------------------------------------------
+# 기본 설정 로드
+# ----------------------------------------------------------------------
 _DEFAULT_CONF = load_base_config()
 _INGESTION_DEFAULTS = _DEFAULT_CONF.get("ingestion", {})
 _TRAINING_DEFAULTS = _DEFAULT_CONF.get("training", {})
 _DATALAKE_DEFAULTS = _DEFAULT_CONF.get("datalake", {})
 
 DEFAULT_URL_TEMPLATE = _INGESTION_DEFAULTS.get(
-    "url_template", "https://www.its.go.kr/opendata/fileDownload/traffic/{year}/{date}_5Min.zip"
+    "url_template",
+    "https://www.its.go.kr/opendata/fileDownload/traffic/{year}/{date}_5Min.zip",
 )
 DEFAULT_JOB_NAME_PREFIX = _INGESTION_DEFAULTS.get("job_name_prefix", "its_traffic_5min")
 DEFAULT_LAKE_PREFIX = _INGESTION_DEFAULTS.get(
-    "lake_prefix", _DATALAKE_DEFAULTS.get("prefix", "traffic/raw")
+    "lake_prefix",
+    _DATALAKE_DEFAULTS.get("prefix", "traffic/raw"),
 )
-DEFAULT_TRAINING_JOB_NAME = _TRAINING_DEFAULTS.get("job_name", "its_traffic_5min_convlstm")
-DEFAULT_TRAINING_WINDOW_DAYS = int(_TRAINING_DEFAULTS.get("window_days", 1))
+DEFAULT_TRAINING_JOB_NAME = _TRAINING_DEFAULTS.get(
+    "job_name",
+    "its_traffic_5min_convlstm",
+)
+
+# 학습 valid 구간(마지막 N일) 기본값: env → config → 1일
+DEFAULT_VALID_DAYS = int(
+    os.getenv(
+        "TRAINING_VALID_DAYS",
+        str(_TRAINING_DEFAULTS.get("valid_days", 1)),
+    )
+)
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -57,29 +74,29 @@ def _parse_start_date(raw: str | None, fallback: datetime) -> datetime:
     return datetime.strptime(raw, "%Y-%m-%d")
 
 
+# ----------------------------------------------------------------------
+# Airflow DAG 기본 설정
+# ----------------------------------------------------------------------
 SCHEDULE_INTERVAL = os.getenv("ITS_DAG_SCHEDULE", "@daily")
-START_DATE = _parse_start_date(os.getenv("AIRFLOW_ITS_START_DATE"), datetime(2025, 11, 1))
+
+# 파이프라인 기준 시작일 (env 없으면 2025-11-01)
+START_DATE = _parse_start_date(
+    os.getenv("AIRFLOW_ITS_START_DATE"),
+    datetime(2025, 11, 1),
+)
+
 CATCHUP_ENABLED = _env_bool("CATCHUP_ENABLED", True)
 MAX_ACTIVE_RUNS = int(os.getenv("ITS_DAG_MAX_ACTIVE_RUNS", "1"))
-TRAINING_BASE_DATE = _parse_start_date(os.getenv("AIRFLOW_ITS_START_DATE"), START_DATE,)
+
+# 파이프라인 범위 기반 시작일 (날짜 리스트 생성 시 사용)
+PIPELINE_BASE_DATE = START_DATE.date()
 
 
-def resolve_processing_date(context) -> tuple[datetime, str]:
-    params = context["params"]
-
-    override = params.get("processing_date")
-    if override:
-        dt = datetime.strptime(override, DATE_FMT)
-    else:
-        dt = context["logical_date"]
-
-    # 기본은 실행일 전날 데이터를 처리한다.
-    dt = dt - timedelta(days=1)
-
-    return dt, dt.strftime(DATE_FMT)
-
-
-def build_ingestion_url(params: Dict[str, Any], logical_date, date_str: str) -> str:
+def build_ingestion_url(params: Dict[str, Any], logical_date: datetime, date_str: str) -> str:
+    """
+    주어진 date_str(YYYYMMDD)에 대해 ingestion URL을 생성한다.
+    logical_date는 URL template에서 {year}/{month}/{day} 치환에 사용.
+    """
     template = params.get("ingestion_url_template", DEFAULT_URL_TEMPLATE)
     return template.format(
         date=date_str,
@@ -106,11 +123,14 @@ def minio_partition_exists(minio_conf: Dict[str, Any], prefix: str, date_str: st
     except S3Error as exc:
         logger.warning("MinIO lookup failed (%s): %s", pfx, exc)
         return False
-    
 
+
+# ----------------------------------------------------------------------
+# DAG 정의
+# ----------------------------------------------------------------------
 @dag(
     dag_id="its_traffic_full_pipeline",
-    description="ITS Traffic → MinIO → Spark → Postgres → ML Pipeline (Airflow 3.1.3 Compatible)",
+    description="ITS Traffic → MinIO → Spark → Postgres → ML Pipeline (range-based)",
     schedule=SCHEDULE_INTERVAL,
     start_date=START_DATE,
     catchup=CATCHUP_ENABLED,
@@ -124,86 +144,204 @@ def minio_partition_exists(minio_conf: Dict[str, Any], prefix: str, date_str: st
         "ingestion_url_template": DEFAULT_URL_TEMPLATE,
         "ingestion_job_name_prefix": DEFAULT_JOB_NAME_PREFIX,
         "ingestion_lake_prefix": DEFAULT_LAKE_PREFIX,
-        "training_window_days": DEFAULT_TRAINING_WINDOW_DAYS,
         "training_job_name": DEFAULT_TRAINING_JOB_NAME,
         "training_overrides": {},
-        "processing_date": os.getenv("PROCESSING_DATE_OVERRIDE"),
+        "valid_days": DEFAULT_VALID_DAYS,
+        # 필요하면 processing_date 등 추가 파라미터를 여기에 붙인다.
     },
     tags=["its", "traffic", "mlops"],
 )
 def its_traffic_full_pipeline():
+    """
+    한 번 실행 시:
+      1) PIPELINE_BASE_DATE ~ (logical_date - 1일)까지 RAW 수집 (이미 있으면 skip)
+      2) 같은 범위를 BRONZE → SILVER → GOLD로 전처리
+      3) 전체 구간 중 마지막 N일을 valid로 떼고 나머지로 학습
+    """
     base_conf = load_base_config()
 
     # -------------------------------
-    # 1) RAW ingestion
+    # 0) 날짜 리스트 생성
     # -------------------------------
     @task
-    def ingest_raw(**context):
+    def build_date_list(**context) -> List[str]:
+        """
+        PIPELINE_BASE_DATE ~ (logical_date - 1일)까지의 날짜 리스트(YYYYMMDD)를 생성.
+        예: PIPELINE_BASE_DATE=2025-11-01, logical_date=2025-11-22 → 20251101~20251121
+        """
+        logical_date: datetime = context["logical_date"]
+        end_date = logical_date.date() - timedelta(days=1)
+        start_date = PIPELINE_BASE_DATE
+
+        if start_date > end_date:
+            logger.warning(
+                "[DATE_RANGE] start_date(%s) > end_date(%s). No dates to process.",
+                start_date,
+                end_date,
+            )
+            return []
+
+        dates: List[str] = []
+        cur = start_date
+        while cur <= end_date:
+            dates.append(cur.strftime(DATE_FMT))
+            cur += timedelta(days=1)
+
+        logger.info(
+            "[DATE_RANGE] %s → %s (%d days)",
+            dates[0],
+            dates[-1],
+            len(dates),
+        )
+        return dates
+
+    # -------------------------------
+    # 1) RAW ingestion (범위 기반)
+    # -------------------------------
+    @task
+    def ingest_all_raw(dates: List[str], **context) -> List[str]:
+        """
+        날짜 리스트 전체에 대해:
+          - MinIO에 RAW 파티션이 없으면 다운로드 & 업로드
+          - 있으면 skip
+        모든 날짜에 대해 RAW 존재를 보장한 뒤, 원본 dates를 그대로 반환.
+        """
+        if not dates:
+            logger.warning("[INGEST] No dates to ingest. Skipping RAW ingestion.")
+            return []
+
         params = context["params"]
         minio_conf = base_conf["minio"]
         lake_prefix = params["ingestion_lake_prefix"]
 
-        logical_date, date_str = resolve_processing_date(context)
-        url = build_ingestion_url(params, logical_date, date_str)
+        ingested_count = 0
+        skipped_count = 0
 
-        if minio_partition_exists(minio_conf, lake_prefix, date_str):
-            logger.info("[SKIP] RAW partition already exists for %s", date_str)
-            return date_str
+        for date_str in dates:
+            if minio_partition_exists(minio_conf, lake_prefix, date_str):
+                logger.info("[INGEST][SKIP] RAW already exists for %s", date_str)
+                skipped_count += 1
+                continue
 
-        job_name = f"{params['ingestion_job_name_prefix']}_{date_str}"
-        logger.info("[INGEST] %s → %s", url, job_name)
+            # URL 생성용 logical_date
+            dt = datetime.strptime(date_str, DATE_FMT)
+            url = build_ingestion_url(params, dt, date_str)
 
-        ingest_from_url(job_name=job_name, url=url)
+            job_name = f"{params['ingestion_job_name_prefix']}_{date_str}"
+            logger.info("[INGEST] %s → %s", url, job_name)
+            ingest_from_url(job_name=job_name, url=url)
+            ingested_count += 1
 
-        return date_str
-
-    # -------------------------------
-    # 2) RAW → BRONZE
-    # -------------------------------
-    @task
-    def raw_to_bronze(date: str):
-        logger.info("[RAW→BRONZE] %s", date)
-        its_raw_to_bronze(start_date=date, end_date=date)
-        return date
-
-    # -------------------------------
-    # 3) BRONZE → SILVER
-    # -------------------------------
-    @task
-    def bronze_to_silver(date: str):
-        logger.info("[BRONZE→SILVER] %s", date)
-        its_bronze_to_silver(start_date=date, end_date=date)
-        return date
+        logger.info(
+            "[INGEST] Completed. Total=%d, ingested=%d, skipped(existing)=%d",
+            len(dates),
+            ingested_count,
+            skipped_count,
+        )
+        # 전처리는 모든 날짜에 대해 수행해야 하므로 원본 dates 반환
+        return dates
 
     # -------------------------------
-    # 4) SILVER → GOLD
+    # 2) RAW → BRONZE (범위 기반)
     # -------------------------------
     @task
-    def silver_to_gold(date: str):
-        logger.info("[SILVER→GOLD] %s", date)
-        its_silver_to_gold(start_date=date, end_date=date)
-        return date
+    def raw_to_bronze_all(dates: List[str]) -> List[str]:
+        if not dates:
+            logger.warning("[BRONZE] No dates to process. Skipping RAW→BRONZE.")
+            return []
+
+        for date_str in dates:
+            logger.info("[RAW→BRONZE] %s", date_str)
+            its_raw_to_bronze(start_date=date_str, end_date=date_str)
+        return dates
 
     # -------------------------------
-    # 5) ML Training
+    # 3) BRONZE → SILVER (범위 기반)
     # -------------------------------
     @task
-    def train_model(date: str, **context):
+    def bronze_to_silver_all(dates: List[str]) -> List[str]:
+        if not dates:
+            logger.warning("[SILVER] No dates to process. Skipping BRONZE→SILVER.")
+            return []
+
+        for date_str in dates:
+            logger.info("[BRONZE→SILVER] %s", date_str)
+            its_bronze_to_silver(start_date=date_str, end_date=date_str)
+        return dates
+
+    # -------------------------------
+    # 4) SILVER → GOLD (범위 기반)
+    # -------------------------------
+    @task
+    def silver_to_gold_all(dates: List[str]) -> List[str]:
+        if not dates:
+            logger.warning("[GOLD] No dates to process. Skipping SILVER→GOLD.")
+            return []
+
+        for date_str in dates:
+            logger.info("[SILVER→GOLD] %s", date_str)
+            its_silver_to_gold(start_date=date_str, end_date=date_str)
+        return dates
+
+    # -------------------------------
+    # 5) ML Training (범위 기반: 마지막 N일 valid)
+    # -------------------------------
+    @task
+    def train_model_full(dates: List[str], **context):
+        if not dates:
+            logger.warning("[TRAIN] No dates to train on. Skipping training.")
+            return
+
         params = context["params"]
+        valid_days = int(params.get("valid_days", DEFAULT_VALID_DAYS))
+        valid_days = max(valid_days, 1)
 
-        start_dt = TRAINING_BASE_DATE.strftime(DATE_FMT)
+        if len(dates) <= valid_days:
+            logger.warning(
+                "[TRAIN] Not enough dates (%d) for train/valid split (valid_days=%d). Skipping.",
+                len(dates),
+                valid_days,
+            )
+            return
 
-        end_dt = date
+        # 정렬되어 있다고 가정: [d0, d1, ..., dN]
+        train_dates = dates[:-valid_days]
+        valid_dates = dates[-valid_days:]
+
+        train_start = train_dates[0]
+        train_end = train_dates[-1]
+        valid_start = valid_dates[0]
+        valid_end = valid_dates[-1]
 
         job_name = params["training_job_name"]
 
-        cfg = TrainConfig(job_name=job_name, start_date=start_dt, end_date=end_dt)
+        # TrainConfig는 start_date/end_date만 필수로 사용하고,
+        # valid 구간 정보는 있으면 필드로 세팅 (없으면 무시)하는 방식으로 처리
+        cfg = TrainConfig(
+            job_name=job_name,
+            start_date=train_start,
+            end_date=train_end,
+        )
 
-        for key, value in params.get("training_overrides", {}).items():
+        # training_overrides + train/valid 구간 정보 합쳐서 덮어쓰기
+        overrides: Dict[str, Any] = dict(params.get("training_overrides", {}))
+        overrides.setdefault("valid_start_date", valid_start)
+        overrides.setdefault("valid_end_date", valid_end)
+        overrides.setdefault("valid_days", valid_days)
+
+        for key, value in overrides.items():
             if hasattr(cfg, key):
                 setattr(cfg, key, value)
 
-        logger.info("[TRAIN] %s range %s → %s", job_name, start_dt, end_dt)
+        logger.info(
+            "[TRAIN] %s train %s→%s, valid %s→%s (valid_days=%d)",
+            job_name,
+            train_start,
+            train_end,
+            valid_start,
+            valid_end,
+            valid_days,
+        )
         run_training(cfg)
 
     # -------------------------------
@@ -211,13 +349,14 @@ def its_traffic_full_pipeline():
     # -------------------------------
     start = EmptyOperator(task_id="start")
 
-    ingestion_date = ingest_raw()
-    bronze = raw_to_bronze(ingestion_date)
-    silver = bronze_to_silver(bronze)
-    gold = silver_to_gold(silver)
-    train_model(gold)
+    date_list = build_date_list()
+    ingested = ingest_all_raw(date_list)
+    bronze = raw_to_bronze_all(ingested)
+    silver = bronze_to_silver_all(bronze)
+    gold = silver_to_gold_all(silver)
+    train_model_full(gold)
 
-    start >> ingestion_date
+    start >> date_list
 
 
 its_traffic_full_pipeline()
